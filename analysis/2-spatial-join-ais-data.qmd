@@ -1,0 +1,354 @@
+---
+title: 2. Spatial join ais data and combine sattelite and terrestrial data
+format: 
+  html: 
+    code-fold: true
+    code-summary: "Show the code"
+    theme: cosmo
+    toc: true
+    toc-depth: 4
+    embed-resources: true
+execute:
+  echo: true
+  message: false
+  warning: false
+  error: false
+editor: visual
+---
+
+```{r}
+library(here)
+source(here("analysis", "0-set-paths.r")) # set paths for folders and files
+source(here("analysis", "r-libraries-and-custom-functions.r")) # load in libraries
+
+```
+
+
+## Critical Habitat Rice Whale
+
+Read in [shape file data for the critical habitat for the Rice's whale](https://noaa.maps.arcgis.com/home/item.html?id=f85d90527131406489ce721b2b71960b).
+
+According to the description:
+
+> "Critical habitat for the Rice's whale includes all marine waters from a nearshore boundary corresponding to the 100-meter isobath to an offshore boundary corresponding to the 400-meter isobath in the Gulf of Mexico and between the U.S. Exclusive Econ"
+
+The CRS is 4326 according their description:
+
+> "Standardized spatial reference is the World Geodetic System 1984 geographic coordinate system (GCS_WGS_1984, EPSG well-known identifier 4326)"
+
+```{r}
+# Shape file is loaded in the sourced function script at beginning of the notebook
+if(st_crs(rice_critical_area)$epsg == 4326){
+    print("CRS of shape file of Rice Whale Habitat matches website description")
+} else{
+    print("CRS of shape file of Rice Whale Habitat DOES NOT match website description")
+    
+}
+
+# st_write(rice_critical_area, here("data", "processed","rice_critical_area.kml" ), driver = "kml")
+
+```
+
+Here is what the shape file looks like on a map:
+
+```{r}
+
+mapview(rice_critical_area)
+
+```
+
+
+## Gulf Of Mexico
+
+The Gulf Of Mexico shape file will be used to identify ships who's AIS broadcast points are erroneously transmitting as inside the critical habitat. The shape file is extended by 5 miles in order to count ships in the ports and small waterways as still being in the Gulf of Mexico. 
+
+```{r}
+# Shape file is loaded in the sourced function script at beginning of the notebook
+
+# When using as a classifier for ships outside of Gulf of Mexico, extend by 5 miles to cover docks and small waterways
+
+gulf_area_extended = extend_buffer_x_miles(gulf_area, 5)
+ 
+
+```
+
+## Marine Cadastre Vessel Key
+
+MarineCadastre.gov uses the Coast Guard's [Authoritative Vessel Identification Service (AVIS) database](https://coast.noaa.gov/data/marinecadastre/ais/VesselTypeCodes2018.pdf) to categorgize vessel type. The key was uploaded to pinpoint, OCR'd uinsg the table extraction feature and read as a csv.
+
+This data will be joined to the AIS Shipping data so that we can determine the vessel types.
+
+```{r}
+
+df_vessel_key_raw = read_csv(noaa_vessel_key_path)  %>% 
+    janitor::clean_names() %>% 
+    mutate(across(vessel_group_2018, clean_text)) %>% 
+    filter(!(vessel_type_2018 %in% c("100 to 199", "200 to 255", "256 to 999")))
+
+
+df_vessel_key_range = df_vessel_key_raw  %>% 
+    filter(vessel_type_2018 == "1-19") %>% 
+    separate(vessel_type_2018, into = c("start", "end"), sep = "-") %>% 
+    mutate(across(c(start, end), as.numeric)) %>% 
+    rowwise() %>% 
+    mutate(value = list(seq(start, end))) %>% 
+    dplyr::select(-start, -end) %>% 
+    unnest(value) %>% 
+    rename(vessel_type_2018 = value)
+
+vessel_key_df = df_vessel_key_raw %>% 
+    filter(vessel_type_2018 != "1-19") %>% 
+    mutate(across(vessel_type_2018, as.numeric)) %>% 
+    bind_rows(df_vessel_key_range) %>% 
+    arrange(vessel_type_2018) %>% 
+    select(vessel_type_2018, vessel_group_2018, ais_ship_cargo_classification)
+
+vessel_key_df  %>% 
+    gt() %>% 
+    tab_header(
+    title = md("Ais Vessel Key")
+  ) %>% 
+    opt_interactive()
+
+```
+
+
+## **Transform**: Filter data for polygons of interest
+
+For each file (representing a day of data), there are about 6-9M datapoints.
+
+For a year of data, that would be about a conservative 2,190,000,000 data points (Two billion one hundred ninety million).
+
+Therefore when reading in each day of data, we will filter for data belong to ship mmsi's that passed through the critical area habitat and save as an RDS for reading into code later.
+
+```{r}
+# List files
+
+ais_files = list.files(ais_marinecadastre_2022_path, full.names = TRUE, recursive = TRUE )
+
+```
+
+### Terrestrial ais files according to the **critical habitat area**
+
+```{r}
+
+# plan(multisession, workers = 2)
+# tic("Read, filter, combine csv's")
+
+# # Read and combine csv's into one dataframe
+# furrr::future_walk(missing_files, function(x){
+
+#     df_sf_filtered = read_filter_ais(x, rice_critical_area )
+#     saveRDS(df_sf_filtered, file = here(ais_mar_cadas_crit_hab_path, glue("{tools::file_path_sans_ext(basename(x))}.rds") ))
+
+# }, .progress = TRUE)
+# toc()
+
+# plan(sequential) # stops the multisession
+
+
+
+```
+
+```{r}
+# # Read in files ----------
+# critical_habitat_ships_sf = read_all_filtered_data(ais_mar_cadas_crit_hab_path)
+
+# # Classify which points are in Gulf of Mexico or not ------------
+# tic("Add gulf classification")
+# critical_habitat_ships_gom = is_point_inside_polygon(critical_habitat_ships_sf, gulf_area_extended, "inside_gulf")
+# toc()
+
+# saveRDS(critical_habitat_ships_gom , critical_habitat_ships_gom_path)
+```
+
+### Global Fishing Watch Sattelite Data
+
+As the range of land receivers is usually limited to 40-50 miles off the coast, the data were combined with satellite-collected AIS data from [Global Fishing Watch](https://globalfishingwatch.org/) to provide comprehensive coverage of the Gulf of Mexico.
+
+The data provided only includes AIS broadcast points that are inside the the polygon. 
+
+```{r}
+
+tic("Read in Global Fishing Watch Data")
+sattelite_df = read_csv(ais_gfw_2022_path) %>% 
+  rename(mmsi = ssvid, base_date_time = timestamp, sog = speed_knots ) %>% 
+  mutate(base_date_time = lubridate::ymd_hms(base_date_time)) %>% 
+  arrange(base_date_time)  %>% 
+  mutate(ais_source = "sattelite")
+toc() 
+
+tic("Classify Global Fishing Watch Data")
+sattelite_sf = sattelite_df  %>% 
+  st_as_sf(coords = c("lon", "lat"), 
+                        crs = 4326)  %>% 
+  is_point_inside_polygon(rice_critical_area, "inside_polygon") %>% 
+  is_point_inside_polygon(gulf_area_extended, "inside_gulf")
+toc()
+
+```
+
+## Load: Combind land based reciever data and sattelite reciever data
+
+### Collect missing land based reciever data
+
+The sattelite data can provide data points that were out of range from the land based reciever.
+
+There are 254 ships that the land based reciever data did not record as passing through the critical habitat. 
+
+```{r}
+
+critical_habitat_ships_gom  = readRDS(critical_habitat_ships_gom_path)
+
+# Get unique mmsi from sattelite ais
+sattelite_polygon_mmsi = sattelite_sf  %>% 
+  as_tibble() %>% 
+  tidytable::distinct(mmsi) %>% 
+  select(mmsi)
+
+# Get unique mmsi from terrestrial ais
+terrestrial_polygon_mmsi = critical_habitat_ships_gom   %>% 
+  as_tibble() %>% 
+  tidytable::distinct(mmsi)
+
+# Get unique mmsi from terrestrial data
+
+sattellite_exclusive_mmsi = anti_join(sattelite_polygon_mmsi, terrestrial_polygon_mmsi, join_by(mmsi)) %>% pull(mmsi)
+
+length(sattellite_exclusive_mmsi)
+
+```
+
+
+The following code takes those mmsi's that were not initally grabbed and adds it to the MarineCadastre.gov data.  
+
+```{r}
+# # Function to grab all ais data for the sattelite exclusive ships
+
+# read_filter_for_sattelite_exclusive = function(file, mmsi_of_interest){
+
+#   df = read_csv(file) %>% 
+#          janitor::clean_names()
+
+#   df_result = df  %>% 
+#     tidytable::filter(mmsi %in% mmsi_of_interest)
+
+#    saveRDS(df_result, file = here(sattelite_exclusive_path, glue("{tools::file_path_sans_ext(basename(file))}.rds") ))
+  
+# }
+
+# # Save sattelite exclusive files
+# purrr::walk(ais_files, function(file) read_filter_for_sattelite_exclusive(file, sattellite_exclusive_mmsi), .progress = TRUE)
+
+# # Read in the files and process them with the is_point_inside_polygon function
+# tic("Process the new terrestrial files")
+# # List files that were just saved
+# ls_sat_search_files = list.files(path = sattelite_exclusive_path, full.names = TRUE)
+# # Read into one sf object
+# search_for_sat_exclusive_sf = purrr::map_df(ls_sat_search_files, readRDS, .progress = TRUE)
+# # Process the sf object to get the inside_polygon and inside_gulf 
+# search_for_sat_exclusive_sf = search_for_sat_exclusive_sf  %>% 
+#   st_as_sf(coords = c("lon", "lat"), 
+#                         crs = 4326)  %>% 
+#   is_point_inside_polygon(rice_critical_area, "inside_polygon") %>% 
+#   is_point_inside_polygon(gulf_area_extended, "inside_gulf")
+# toc()
+
+
+# complete_crit_hab_terr_sf = bind_rows(critical_habitat_ships_gom, search_for_sat_exclusive_sf) %>% 
+#   mutate(ais_source = "terrestrial")
+  
+# saveRDS(complete_crit_hab_terr_sf, complete_crit_hab_terr_path )
+
+
+
+
+```
+
+### Combine sattelite and completed terrestrial data together and save
+
+```{r}
+
+# # Read in the completed land reciever data
+# complete_terr_crit_hab_sf = readRDS(complete_crit_hab_terr_path)
+
+
+# terr_sat_crit_hab_sf = bind_rows(complete_crit_hab_terr_sf, sattelite_sf )
+
+# saveRDS(terr_sat_crit_hab_sf,terr_sat_crit_hab_sf_path )
+
+```
+
+### Create unique vessel key for length
+
+```{r}
+
+# Read in the land based reciever and the sattelite data
+terr_sat_crit_hab_sf = readRDS(terr_sat_crit_hab_sf_path)
+
+```
+
+MMSI is unique to a transponder, and IMO is unique to the ship. Due to a variety of factors, there could be ships with the same MMSI. In order to look at the uniqueness of the MarineCadastre.gov for the gulf of mexico, the land base reciever is grouped by mmsi, imo, vessel_name, vessel_type, and length
+
+```{r}
+
+vessel_key_terrestrial_1 = terr_sat_crit_hab_sf  %>% 
+  tidytable::filter(inside_gulf == TRUE)  %>%  
+  tidytable::filter(ais_source == "terrestrial")  %>% 
+  tidytable::summarise(n_ais_responses = n(), .by = c(mmsi, imo, vessel_name, vessel_type, length))  %>% 
+  mutate(n_mmsi = n(), .by = mmsi)
+
+# These are the terrestial vessels inside gulf that have duplicates, in this case responses with no vessel name that might have been a different ship
+terr_gulf_dupes = vessel_key_terrestrial_1 %>% 
+  tidytable::filter(n_mmsi > 1) %>% 
+  arrange(mmsi)
+
+cat_table(terr_gulf_dupes, "Non unique MMSI's when grouped by mmsi, imo, vessel_name, vessel_type, length")
+
+```
+
+The length data from Global Fishing Watch uses vessel registries when available and inferred length from the GFW vessel characterization model otherwise (described in this [paper](https://www.science.org/doi/full/10.1126/science.aao5646)). The data from the land recievers was used when possible and when the length data was unavailable then the Global Fishing Watch lenght was used.
+
+
+```{r}
+
+#  Global Fishing Watch Length Data
+vessel_key_gfw_df = read_csv(here("data", "source", "global-fishing-watch", "Rice_Whale_NPR_length.csv")) %>% 
+  rename(mmsi = ssvid, vessel_class_gfw = vessel_class, vessel_length_gfw = vessel_length, inferred_tonnage_gfw = inferred_tonnage, vessel_value_gfw =  value)
+
+
+## All of the terrestrial dupes that don't have a vessel name are not recorded as having gone in the polygon. 
+terr_sat_crit_hab_sf  %>% 
+   tidytable::filter(inside_gulf == TRUE) %>% 
+   tidytable::filter(ais_source == "terrestrial") %>% 
+   tidytable::filter( (mmsi %in% terr_gulf_dupes$mmsi) & is.na(vessel_name)) %>% 
+   summarise(n = n(), .by = inside_polygon)
+
+
+vessel_key_terrestrial_2 = vessel_key_terrestrial_1  %>% 
+  filter(!((mmsi %in% terr_gulf_dupes$mmsi) & is.na(vessel_name))) %>% 
+  dplyr::left_join(vessel_key_df, join_by(vessel_type == vessel_type_2018))
+
+complete_key_inside_gulf = left_join( vessel_key_terrestrial_2,vessel_key_gfw_df, join_by(mmsi))
+
+# For terrestrial data ships with no ship length fill in length from satettelite data
+# If both ships do not have length put NA
+complete_key_inside_gulf = complete_key_inside_gulf  %>% 
+  mutate(final_length = case_when(
+    length == 0 | is.na(length) ~ vessel_length_gfw,
+    length != 0 & !is.na(length) ~ length,
+    TRUE ~ NA_integer_
+  )) %>% 
+  mutate(final_length_category = case_when(
+    (length == 0 | is.na(length)) & (vessel_length_gfw != 0 | !is.na(vessel_length_gfw))  ~ "gfw_length",
+    length != 0 & !is.na(length) ~ "terrestrial_length",
+    TRUE ~ "no_length"
+  ))
+
+
+# saveRDS(complete_key_inside_gulf,complete_key_inside_gulf_path )
+# saveRDS(terr_gulf_dupes, terr_gulf_dupes_path )
+
+
+```
+

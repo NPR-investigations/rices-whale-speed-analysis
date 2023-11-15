@@ -1,0 +1,175 @@
+---
+title: 3. Transform ais data
+format: 
+  html: 
+    code-fold: true
+    code-summary: "Show the code"
+    theme: cosmo
+    toc: true
+    toc-depth: 4
+    embed-resources: true
+execute:
+  echo: true
+  message: false
+  warning: false
+  error: false
+editor: visual
+---
+
+```{r}
+library(here)
+source(here("analysis", "0-set-paths.r")) # set folder paths for data
+source(here("analysis", "r-libraries-and-custom-functions.r")) # load in libraries
+```
+
+
+
+## Analysis
+
+Filter the data to valid ships
+
+```{r}
+
+# Read in combined sattelite and data
+tic("Read in data")
+terr_sat_crit_hab_sf = readRDS(terr_sat_crit_hab_sf_path )
+toc()
+
+# Read in dupes and key 
+terr_gulf_dupes = readRDS(terr_gulf_dupes_path)
+
+# Read in complete key
+complete_key_inside_gulf = readRDS(complete_key_inside_gulf_path)
+
+
+
+complete_key_inside_gulf_less_than_65 = complete_key_inside_gulf  %>% 
+  filter(final_length < 65 | (vessel_type %in% c(55,51,35)))   # 55-law enforcement, 51-search and rescue vessel, 35 miliatary
+
+## First Remove the dupes from previous steps
+
+dupes_status = terr_sat_crit_hab_sf  %>% 
+  tidytable::filter((mmsi %in% terr_gulf_dupes$mmsi & is.na(imo) & ais_source == "terrestrial"))
+
+# Fill in the sattelite info rows and get rid of the dupes
+
+tic("Fill in missing data for sattelite")
+terr_sat_crit_hab_sf_filled = terr_sat_crit_hab_sf  %>% 
+  # Get rid of the dupes from terrestrial taht never went into polygon
+  tidytable::filter(!(mmsi %in% terr_gulf_dupes$mmsi & is.na(imo) & ais_source == "terrestrial")) %>% 
+  group_by(mmsi) %>% # Group by mmsi
+  arrange(desc(ais_source)) %>% # Arrange by ais_source to ensure terrestrial comes first
+  fill(imo, vessel_name, vessel_type, .direction = "down") %>%
+  ungroup() # Ungroup the data frame
+toc()
+
+# Classify transits to identify ships we need to remove
+
+terr_sat_crit_hab_sf_filled_transits =  terr_sat_crit_hab_sf_filled  %>% 
+  classify_transits()
+
+ships_to_remove_df = tibble()
+
+
+erroneous_ships_1 = terr_sat_crit_hab_sf_filled_transits  %>% 
+  as_tibble() %>% 
+  filter(inside_polygon == TRUE & inside_gulf == TRUE & change_point == TRUE )  %>%  # get all change points entering the habitat
+  tidytable::summarise(n = n(), transits = n_distinct(transit_num), .by = c(mmsi, imo, vessel_name, vessel_type,  not_valid)) %>% # Number of valid and invalid transits for each ship
+  tidyr::pivot_wider( names_from = not_valid, values_from = c(n, transits), values_fill = 0) %>% 
+  clean_names() %>%
+  filter(n_true > 0 & n_false == 0)  %>% 
+  arrange(desc(n_true)) %>% 
+  filter(n_true > 1)
+
+erroenous_ships_1_add = erroneous_ships_1  %>% 
+  select(mmsi, imo, vessel_name, vessel_type) %>% 
+  mutate(reason_to_remove = "outside_gulf_pings_before_transit")
+
+ships_to_remove_df = bind_rows(ships_to_remove_df, erroenous_ships_1_add)
+
+# Ships that never left the polygon
+ships_never_left_polygon = terr_sat_crit_hab_sf_filled_transits    %>% 
+  tidytable::summarise(n_ais_response = n(), 
+         n_responses_in_polygon = sum(inside_polygon),.by =  c(mmsi, imo, vessel_name, vessel_type)) %>% 
+  tidytable::filter(n_ais_response == n_responses_in_polygon )
+
+ships_never_left_polygon_add = ships_never_left_polygon %>% 
+  filter(n_ais_response > 10000)  %>% 
+  select(mmsi, imo, vessel_name, vessel_type) %>% 
+  mutate(reason_to_remove = "oil_platforms_never_left_polygon")
+
+ships_to_remove_df = bind_rows(ships_to_remove_df, ships_never_left_polygon_add)
+
+# Remove ships from this step
+
+terr_sat_crit_hab_sf_filled = anti_join(terr_sat_crit_hab_sf_filled, ships_to_remove_df, join_by(mmsi, imo, vessel_name, vessel_type))
+
+terr_sat_crit_hab_sf_filled = anti_join(terr_sat_crit_hab_sf_filled, complete_key_inside_gulf_less_than_65, join_by(mmsi, imo, vessel_name, vessel_type))
+
+# saveRDS(terr_sat_crit_hab_sf_filled, terr_sat_crit_hab_sf_filled_path)
+```
+
+Classify the distance between each sement for each transit
+
+```{r}
+
+tic("Read in data")
+terr_sat_crit_hab_sf_filled = readRDS(terr_sat_crit_hab_sf_filled_path)
+toc()
+
+
+# 13 minutes
+tic("Classify Distances")
+transit_distance_df = terr_sat_crit_hab_sf_filled   %>% 
+  tidytable::filter(inside_gulf == TRUE) %>% 
+  classify_transits2() %>% 
+  classify_speeding_streaks(10) %>% 
+  st_as_sf() %>% 
+  classify_distances()
+toc()
+
+# saveRDS(transit_distance_df, transit_distance_df_path)
+
+```
+
+Calculate a distance weighted average
+
+
+```{r}
+# Read in classified data
+transit_distance_df = readRDS(transit_distance_df_path)  
+
+
+transit_in_habitat = transit_distance_df  %>% 
+  filter(inside_polygon == TRUE) 
+
+
+# Remove erroenous coordinates that result in impossible speeds and reclassify
+transit_in_habitat_filtered = transit_in_habitat %>% 
+  mutate(sog_between = as.numeric(units::drop_units(sog_between))) %>% 
+  filter(sog_between < 60) %>% # get rid of segments that calculated a 60 knots speed or more
+  st_as_sf() %>% 
+  classify_distances()
+
+
+schedule = transit_in_habitat_filtered  %>% 
+  make_transit_schedule2() %>% 
+  transit_summary(speeding_above_10)
+
+
+transit_in_habitat_summary = transit_in_habitat_filtered  %>% 
+  summarise_dwas2() %>% 
+  mutate(dwas2 = as.numeric(units::drop_units(dwas))) %>% 
+  mutate(speeding_above_10 = case_when(
+       dwas2 >= 10 ~ "speed_above_10",
+       dwas2  < 10 ~ "speed_below_10",
+       TRUE ~ "PROBLEM")) 
+
+result = transit_in_habitat_summary  %>% 
+  transit_summary(speeding_above_10)
+
+
+cat_table(result, "Percent of Transits Above 10 Knots")
+
+
+
