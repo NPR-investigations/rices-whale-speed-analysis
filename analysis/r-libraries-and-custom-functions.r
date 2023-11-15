@@ -22,7 +22,7 @@ rice_critical_area = read_sf(rice_critical_area_path)
 gulf_area = read_sf(gulf_area_path)
 
 
-# Display functions
+# Display function
 
 cat_table <- function(df, title, subtitle = NA){
 
@@ -39,9 +39,9 @@ cat_table <- function(df, title, subtitle = NA){
     opt_interactive()
 }
 
-# Geospatial functions
 
-## Extending a shape file by x miles
+
+# Extending a shape file by x miles
 extend_buffer_x_miles = function(shape, miles){
     # Check CRS and transform if necessary
   if(st_crs(shape)$proj4string != "+proj=longlat +datum=WGS84 +no_defs"){
@@ -61,7 +61,7 @@ shape_buffered_4326 <- st_transform(shape_buffered, 4326)
   
 }
 
-## Cleaning Text
+# Cleaning Text
 clean_text <- function(text) {
   text %>% 
     str_to_lower() %>%                          # Convert to lowercase
@@ -69,7 +69,7 @@ clean_text <- function(text) {
     str_replace_all("\\s+", "_")                # Replace spaces with underscores
 }
 
-
+# Calculate if a point is inside a polygon and create a column for it
 is_point_inside_polygon = function(sf_table, shape_file, column_name){
 
   # Convert AIS data to same CRS as shapefile
@@ -122,7 +122,6 @@ read_filter_ais = function(file, shape_file){
 
 # Function to see what files you still have to parse if needing to restart a parrallel task
 
-
 get_remaining_files = function(ais_files, parsed_files){
 
   # Extract dates from file paths
@@ -140,7 +139,7 @@ get_remaining_files = function(ais_files, parsed_files){
 
 }
 
-
+# Read files into one dataframe
 read_all_filtered_data = function(dir_path){
 
   # Create list of all files 
@@ -154,7 +153,7 @@ read_all_filtered_data = function(dir_path){
 
 }
 
-## Mapping function
+# Prepare data for mapping function
 
 prep_df_for_map = function(sf_table){
 
@@ -179,6 +178,7 @@ prep_df_for_map = function(sf_table){
   return(df)
   }
 
+# Mapping function, useful for debugging and vizualizing results 
   single_map = function(sf_table, shape_file){
 
       df_for_map = prep_df_for_map(sf_table)
@@ -200,6 +200,10 @@ prep_df_for_map = function(sf_table){
                         popup = ~popup_content)
       return(map)
   }
+
+
+# First function to classify transits that doesn't take into account a day between broadcast points as a new transit
+# Used when looking for erroneous data
 classify_transits = function(df){
 
   df_result = df  %>%
@@ -220,7 +224,9 @@ classify_transits = function(df){
 
 }
 
-# This one add the rule about a day
+
+
+# This classify function add the rule that more than a day between ais broadcast points for a ship is a new transit
 classify_transits2 = function(df){
   df_result = df %>%
     arrange(base_date_time) %>%
@@ -242,7 +248,7 @@ classify_transits2 = function(df){
 
 
 
-
+# Classify speading streaks
 
 classify_speeding_streaks = function(df, speed_limit){
 
@@ -282,7 +288,7 @@ classify_speeding_streaks = function(df, speed_limit){
   return(df_result)
 }
 
-# Distance weighted average methdology ------------------------------
+# Calculate distances between each segment for each transit
 
 
 classify_distances = function(sf_table){
@@ -313,20 +319,7 @@ classify_distances = function(sf_table){
 
 }
 
-summarise_dwas = function(sf_table){
-  df_result = sf_table  %>% 
-    as_tibble() %>% 
-    tidytable::summarize(
-        start_transit_date = min(base_date_time), # Start time of transit
-        end_transit_date = max(base_date_time), # # End time of transit
-        n_ais_responses = n(),
-        total_distance_nm = sum( distance_nautical_miles, na.rm = TRUE),
-        dwas = sum(sog * speed_segment_weight, na.rm = TRUE), # Calculate weighted average speed in knots
-        .by = c(mmsi, imo, vessel_name, vessel_type, transit_num)
-      ) %>% 
-    mutate(transit_in_hours = as.numeric(difftime(end_transit_date , start_transit_date , units = "hours")),
-      transit_in_minutes = as.numeric(difftime(end_transit_date , start_transit_date , units = "mins"))) 
-}
+# Function to calculate distance weighted average
 
 summarise_dwas2 = function(sf_table){
   df_result = sf_table  %>% 
@@ -343,94 +336,8 @@ summarise_dwas2 = function(sf_table){
       transit_in_minutes = as.numeric(difftime(end_transit_date , start_transit_date , units = "mins"))) 
 }
 
-
- make_transit_schedule = function(sf){
-
-     # Convert the spatial dataframe 'sf' to a 'tidytable' format
-    df_result = sf  %>% 
-      as_tibble() %>% 
-      as_tidytable() %>% 
-      # Remove the 'geometry' column, which contains spatial data
-      select(-geometry)  %>% 
-      # Aggregate the data based on 'mmsi' and 'transit_num' 
-      tidytable::summarise(
-        # Identify the earliest and latest date-time values for each transit
-        start_transit_date = min(base_date_time), # Start time of transit
-        end_transit_date = max(base_date_time), # # End time of transit
-        # Count the number of AIS responses for each transit
-        number_ais_responses = n(),  
-        # Compute descriptive statistics for the 'sog' column (Speed Over Ground)
-        across(.cols = c(sog),
-              .fns = list(min = min , max = max, mean = mean, median = median),
-              na.rm = TRUE,
-              .names = "{col}_{fn}"),
-        # Capture maximum speeding streak values for two specific speed limits
-        max_speeding_streak_10 = max(speeding_streak_10),
-        max_speeding_streak_12 = max(speeding_streak_12),
-        # Group the summarization by ship identifier and transit number
-        .by = c(mmsi, transit_num))  %>%  
-      # Calculate transit duration in both hours and minutes             
-      mutate(transit_in_hours = as.numeric(difftime(end_transit_date , start_transit_date , units = "hours")),
-      transit_in_minutes = as.numeric(difftime(end_transit_date , start_transit_date , units = "mins")))  %>% 
-      # Classify as speeding or not
-      mutate(speeding_above_10 = case_when(
-       max_speeding_streak_10  >= 3 ~ "speed_above_10",
-       max_speeding_streak_10  < 3 ~ "speed_below_10",
-       TRUE ~ "PROBLEM"),
-       speeding_above_12 = case_when(
-       max_speeding_streak_12  >= 3 ~ "speed_above_12",
-       max_speeding_streak_12  < 3 ~ "speed_below_12",
-       TRUE ~ "PROBLEM"
-
-   ))   
-
-    return(df_result)
-
-
-
-}
-
-
-make_transit_schedule2 = function(sf){
-
-     # Convert the spatial dataframe 'sf' to a 'tidytable' format
-    df_result = sf  %>% 
-      as_tibble() %>% 
-      as_tidytable() %>% 
-      # Remove the 'geometry' column, which contains spatial data
-      select(-geometry)  %>% 
-      # Aggregate the data based on 'mmsi' and 'transit_num' 
-      tidytable::summarise(
-        # Identify the earliest and latest date-time values for each transit
-        start_transit_date = min(base_date_time), # Start time of transit
-        end_transit_date = max(base_date_time), # # End time of transit
-        # Count the number of AIS responses for each transit
-        number_ais_responses = n(),  
-        # Compute descriptive statistics for the 'sog' column (Speed Over Ground)
-        across(.cols = c(sog),
-              .fns = list(min = min , max = max, mean = mean, median = median),
-              na.rm = TRUE,
-              .names = "{col}_{fn}"),
-        # Capture maximum speeding streak values for two specific speed limits
-        max_speeding_streak_10 = max(speeding_streak_10),
-        # Group the summarization by ship identifier and transit number
-        .by = c(mmsi, imo, vessel_name, vessel_type, transit_num))  %>%  
-      # Calculate transit duration in both hours and minutes             
-      mutate(transit_in_hours = as.numeric(difftime(end_transit_date , start_transit_date , units = "hours")),
-      transit_in_minutes = as.numeric(difftime(end_transit_date , start_transit_date , units = "mins")))  %>% 
-      # Classify as speeding or not
-      mutate(speeding_above_10 = case_when(
-       max_speeding_streak_10 >= 3 ~ "speed_above_10",
-       max_speeding_streak_10 < 3 ~ "speed_below_10",
-       TRUE ~ "PROBLEM")
-   )   
-
-    return(df_result)
-
-
-
-}
-
+# Calculate pct of transits above threshold
+ 
 transit_summary = function(df, grouping_var){
 
   df_result = df  %>% 
@@ -439,16 +346,3 @@ transit_summary = function(df, grouping_var){
 
 }
 
-transit_ship_type_summary = function(df, grouping_var){
-
-  speed_num <- gsub(".*_above_([0-9]+)", "\\1", deparse(substitute(grouping_var)))
-  desc_variable = glue("pct_speed_above_{speed_num}")
-
-  df_result = df  %>% 
-    tidytable::summarise(number_transits = n() , .by = c(vessel_group_2018, {{grouping_var}})) %>% 
-    mutate(pct = (number_transits/sum(number_transits))*100, .by = vessel_group_2018) %>%
-    dplyr::pivot_wider(names_from = {{grouping_var}}, values_from = c(contains("number"), pct), values_fill = 0)  %>% 
-    arrange(desc(!!sym(desc_variable))) %>% 
-    dplyr::left_join(df_number_ship_types_clean, join_by(vessel_group_2018)) %>% 
-    rename(number_ships = n)
-}
