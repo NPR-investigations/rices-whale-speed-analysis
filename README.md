@@ -2,7 +2,7 @@
 
 ## Code
 
-The R scripts and notebooks that were used to run the analys can be found [here]()
+The R scripts and notebooks that were used to run the analys can be found [here](https://github.com/NPR-investigations/rices-whale-speed-analysis/tree/main/analysis)
 
 ## Methodology
 NPR downloaded Automatic Identification Systems (AIS) ship transponder data from MarineCadastre.gov, a cooperative effort between the Bureau of Ocean Energy Management and the National Oceanic and Atmospheric Administration (NOAA). This AIS data is collected by approximately 200 land-based receiving stations from the U.S. Coast Guard's Nationwide Automatic Identification System. As the range of land receivers is usually limited to 40-50 miles off the coast, the data was combined with satellite-collected AIS data from Spire and processed by Global Fishing Watch to provide more comprehensive coverage of the Gulf of Mexico.
